@@ -2,6 +2,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     tools:ignore="ProtectedPermissions"
+    android:sharedUserId="android.uid.system"
     package="im.angry.openeuicc">
     <uses-feature
         android:name="android.hardware.telephony"
@@ -11,6 +12,13 @@
     <uses-permission android:name="android.permission.READ_PRIVILEGED_PHONE_STATE" />
     <uses-permission android:name="android.permission.WRITE_EMBEDDED_SUBSCRIPTIONS" />
     <uses-permission android:name="android.permission.SECURE_ELEMENT_PRIVILEGED_OPERATION" />
+    
+    <uses-permission android:name="android.permission.READ_PHONE_STATE"/>
+    <uses-permission android:name="android.permission.READ_SMS"/>
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <application
         android:name=".PrivilegedOpenEuiccApplication"
@@ -49,6 +57,21 @@
                 <category android:name="android.service.euicc.category.EUICC_UI" />
             </intent-filter>
         </activity>
+
+        <service android:name=".service.AIDLEuiccService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="EuiccAIDL"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+            </intent-filter>
+        </service>
+
+        <receiver android:name=".sms.SmsInterceptor"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED"/>
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

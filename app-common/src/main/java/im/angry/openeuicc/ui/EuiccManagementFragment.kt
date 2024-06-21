@@ -137,8 +137,10 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
                 if (!res) {
                     Log.d(TAG, "Failed to enable / disable profile $iccid")
-                    Toast.makeText(context, R.string.toast_profile_enable_failed, Toast.LENGTH_LONG)
-                        .show()
+                    withContext(Dispatchers.Main){
+                        Toast.makeText(context, R.string.toast_profile_enable_failed, Toast.LENGTH_LONG)
+                            .show()
+                    }
                     return@beginTrackedOperation false
                 }
 
@@ -212,13 +214,13 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
         private val profileMenu: ImageButton = root.requireViewById(R.id.profile_menu)
 
         init {
-            iccid.setOnClickListener {
-                if (iccid.transformationMethod == null) {
-                    iccid.transformationMethod = PasswordTransformationMethod.getInstance()
-                } else {
-                    iccid.transformationMethod = null
-                }
-            }
+//            iccid.setOnClickListener {
+//                if (iccid.transformationMethod == null) {
+//                    iccid.transformationMethod = PasswordTransformationMethod.getInstance()
+//                } else {
+//                    iccid.transformationMethod = null
+//                }
+//            }
 
             profileMenu.setOnClickListener { showOptionsMenu() }
         }
@@ -238,7 +240,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
             )
             provider.text = profile.providerName
             iccid.text = profile.iccid
-            iccid.transformationMethod = PasswordTransformationMethod.getInstance()
+            //iccid.transformationMethod = PasswordTransformationMethod.getInstance()
         }
 
         private fun showOptionsMenu() {

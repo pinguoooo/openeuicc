@@ -33,6 +33,7 @@ class ProfileDeleteFragment : DialogFragment(), EuiccChannelFragmentMarker {
             hint = Editable.Factory.getInstance().newEditable(
                 getString(R.string.profile_delete_confirm_input, requireArguments().getString("name")!!)
             )
+            setText(requireArguments().getString("name"))
         }
     }
     private val inputMatchesName: Boolean

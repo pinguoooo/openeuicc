@@ -1,11 +1,19 @@
 package im.angry.openeuicc.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
 import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import im.angry.openeuicc.R
-import im.angry.openeuicc.util.*
+import im.angry.openeuicc.util.dsdsEnabled
+import im.angry.openeuicc.util.setDsdsEnabled
+import im.angry.openeuicc.util.supportsDSDS
+
 
 class PrivilegedMainActivity : MainActivity() {
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -16,6 +24,7 @@ class PrivilegedMainActivity : MainActivity() {
             menu.findItem(R.id.slot_mapping).isVisible = false
         }
 
+        // 是否支持双卡
         if (tm.supportsDSDS) {
             val dsds = menu.findItem(R.id.dsds)
             dsds.isVisible = true
@@ -41,4 +50,6 @@ class PrivilegedMainActivity : MainActivity() {
         }
         else -> super.onOptionsItemSelected(item)
     }
+
+
 }

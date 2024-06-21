@@ -26,9 +26,11 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
 
     // TODO: Should this be configurable?
     private fun shouldIgnoreSlot(physicalSlotId: Int) =
+        // 有内置 eUICC
         if (hasInternalEuicc) {
             // For devices with an internal eUICC slot, ignore any removable UICC
-            telephonyManager.uiccCardsInfoCompat.find { it.physicalSlotIndex == physicalSlotId }!!.isRemovable
+            // 对于具有内部 eUICC 插槽的设备，请忽略任何可移动的 UICC
+            telephonyManager.uiccCardsInfoCompat.find { it.physicalSlotIndex == physicalSlotId }?.isRemovable?:true
         } else {
             // Otherwise, we can report at least one removable eUICC to the system without confusing
             // it too much.
