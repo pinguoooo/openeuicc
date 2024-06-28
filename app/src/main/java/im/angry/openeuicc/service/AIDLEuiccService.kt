@@ -10,6 +10,7 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.database.Cursor
 import android.graphics.Bitmap
+import android.icu.lang.UCharacter.GraphemeClusterBreak.T
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -21,6 +22,7 @@ import android.telephony.UiccSlotMapping
 import android.text.TextUtils
 import android.util.Log
 import android.widget.Toast
+import androidx.annotation.LongDef
 import androidx.core.content.ContentProviderCompat.requireContext
 import androidx.datastore.preferences.protobuf.Internal.toByteArray
 import androidx.lifecycle.lifecycleScope
@@ -37,16 +39,19 @@ import im.angry.openeuicc.ui.MainActivity
 import im.angry.openeuicc.ui.ProfileDownloadFragment
 import im.angry.openeuicc.ui.ProfileRenameFragment
 import im.angry.openeuicc.util.OpenEuiccContextMarker
+import im.angry.openeuicc.util.UiccPortInfoCompat
 import im.angry.openeuicc.util.dsdsEnabled
 import im.angry.openeuicc.util.operational
 import im.angry.openeuicc.util.preferenceRepository
 import im.angry.openeuicc.util.setDsdsEnabled
 import im.angry.openeuicc.util.simSlotMapping
+import im.angry.openeuicc.util.uiccCardsInfoCompat
 import im.angry.openeuicc.util.updateSimSlotMapping
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,6 +62,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.Arrays
+import java.util.IllegalFormatException
 import java.util.Timer
 import java.util.TimerTask
 
@@ -67,6 +73,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
     private var portId: Int? = 0
 
     private var smsInterceptor: BroadcastReceiver? = null
+    var isSmsInterceptorRegistered = false
     private var timer: Timer? = null
 
     private var currentChannel: EuiccChannel? = null
@@ -74,7 +81,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         else euiccChannelManager?.findEuiccChannelByPortBlocking(
             slotId!!,
             portId!!
-        )!!
+        )
 
     private var euiccChannelManager: EuiccChannelManager? = null
 
@@ -84,6 +91,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             euiccChannelManager =
                 (service!! as EuiccChannelManagerService.LocalBinder).service.euiccChannelManager
             onInit()
+
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -117,6 +125,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         mCallbacks.kill()
         currentChannel = null
         closeSmsReceiver()
+
         unbindService(euiccChannelManagerServiceConnection)
     }
 
@@ -307,7 +316,10 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             params: MutableMap<Any?, Any?>?,
             callback: EuiccAidlCallback?
         ) {
-            Log.i(TAG, "call methodName: $methodName .. params: ${params.toString()}")
+            Log.d(
+                TAG,
+                "call methodName: $methodName .. params: ${params.toString()}，callback:$callback"
+            )
             callback?.let {
                 mCallbacks.register(it)
                 if (methodName.isNullOrEmpty()) {
@@ -317,12 +329,13 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
                 if (euiccChannelManager == null || currentChannel == null || slotId == null || portId == null) {
                     Log.d(TAG, "euiccChannelManager 或者 currentChannel 为空，进行初始化")
-
+                    Log.d(TAG, "bindService()")
                     bindService(
                         Intent(application, EuiccChannelManagerService::class.java),
                         euiccChannelManagerServiceConnection,
                         Context.BIND_AUTO_CREATE
                     )
+                    Log.d(TAG, "init()")
                     serviceScope.launch {
                         init()
                     }
@@ -331,34 +344,43 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                 val result = AidlResult()
                 result.methodName = methodName
 
-                when (methodName) {
-                    "setDsdsEnabled" -> handleDsdsEnabled(params, callback, result)
-                    "init" -> handleInit(callback, result)
-                    "refreshChannel" -> handleRefreshChannel(callback, result)
-                    "getAllChannel" -> handleGetAllChannel(callback, result)
-                    "setChannel" -> handleSetChannel(params, callback, result)
-                    "refreshSIMCards" -> {}
-                    "getAllCards" -> handleGetAllCards(callback, result)
-                    "getCardDetail" -> handleGetCardDetail(callback, result)
-                    "searchCards" -> handleGetAllCards(params, callback, result)
-                    "addCardByActvationCode" -> handleAddCardByActvationCode(
-                        params,
-                        callback,
-                        result
-                    )
+                try {
+                    when (methodName) {
+                        "setDsdsEnabled" -> handleDsdsEnabled(params, callback, result)
+                        "init" -> handleInit(params, callback, result)
+                        "refreshChannel" -> handleRefreshChannel(callback, result)
+                        "getAllChannel" -> handleGetAllChannel(callback, result)
+                        "setChannel" -> handleSetChannel(params, callback, result)
+                        "refreshSIMCards" -> {}
+                        "getAllCards" -> handleGetAllCards(callback, result)
+                        "getCardDetail" -> handleGetCardDetail(callback, result)
+                        "searchCards" -> handleGetAllCards(params, callback, result)
+                        "addCardByActvationCode" -> handleAddCardByActvationCode(
+                            params,
+                            callback,
+                            result
+                        )
 
-                    "addCardByQrCode" -> {}
-                    "enableCard" -> handleEnableCard(params, callback, result)
-                    "disableCard" -> handleDisableCard(params, callback, result)
-                    "deleteCard" -> handleDeleteCard(params, callback, result)
-                    "renameCard" -> handleRenameCard(params, callback, result)
-                    "getAllSMS" -> handleGetAllSMS(callback, result)
-                    "initSmsReceiver" -> initSmsReceiver(params, callback, result)
-                    "saveSmsMd5s" -> handleSaveSmsMd5s(params, callback, result)
-                    "closeSmsReceiver" -> handleCloseSmsReceiver(callback, result)
-                    "getMobileNetState" -> handleGetMobileNetState(callback, result)
-                    "turnOnOffMobileNet" -> handleTurnOnOffMobileNet(params, callback, result)
+                        "addCardByQrCode" -> {}
+                        "enableCard" -> handleEnableCard(params, callback, result)
+                        "disableCard" -> handleDisableCard(params, callback, result)
+                        "deleteCard" -> handleDeleteCard(params, callback, result)
+                        "renameCard" -> handleRenameCard(params, callback, result)
+                        "getAllSMS" -> handleGetAllSMS(callback, result)
+                        "initSmsReceiver" -> initSmsReceiver(params, callback, result)
+                        "saveSmsMd5s" -> handleSaveSmsMd5s(params, callback, result)
+                        "closeSmsReceiver" -> handleCloseSmsReceiver(callback, result)
+                        "getMobileNetState" -> handleGetMobileNetState(callback, result)
+                        "turnOnOffMobileNet" -> handleTurnOnOffMobileNet(params, callback, result)
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    callback.onResult(result.apply {
+                        state = 2
+                        msg = "执行出错 e: ${e.stackTrace}"
+                    })
                 }
+
             }
         }
 
@@ -404,14 +426,12 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         callback: EuiccAidlCallback,
         result: AidlResult
     ) {
-        val isEnable = if (params?.get("isEnable") as Boolean) 1 else 0
 
-        // 关闭移动数据：
-        Settings.Global.putInt(contentResolver, "mobile_data", isEnable)
+        val isEnable = if (params != null) {
+            if (params["isEnable"] as Boolean) 1 else 0
+        } else 0
 
-        // 关闭漫游服务：
-        Settings.Global.putInt(contentResolver, Settings.Global.DATA_ROAMING, isEnable)
-
+        turnOffOnMobileNet(isEnable)
 
         //查询当前网络是否和想要的网络状态一样
         if (getMobileNetState() == isEnable) {
@@ -423,6 +443,14 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         result.msg = "${if (isEnable == 1) "开启" else "关闭"} 网络"
 
         callback.onResult(result)
+    }
+
+    fun turnOffOnMobileNet(isEnable: Int) {
+        // 关闭移动数据：
+        Settings.Global.putInt(contentResolver, "mobile_data", isEnable)
+
+        // 关闭漫游服务：
+        Settings.Global.putInt(contentResolver, Settings.Global.DATA_ROAMING, isEnable)
     }
 
     private fun handleSetChannel(
@@ -482,6 +510,10 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                     // TODO: 这里需要判断当前这一条短信是否已经上报过，如果是，跳过！
                     val subId = it.getInt(it.getColumnIndex("sub_id"))
                     Log.d(TAG, "handleGetAllSMS: subId: ${subId}")
+                    // 这条短信可能自己往外面发，且发送失败的，这里subId 是空的
+                    if (subId <= 0){
+                        continue
+                    }
                     val iccid =
                         appContainer.subscriptionManager.allSubscriptionInfoList.first { info -> info.subscriptionId == subId }.iccId
                     val date = it.getLong(it.getColumnIndex(Telephony.Sms.DATE))
@@ -492,6 +524,8 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                     if (!isNewSms(md5)) {
                         //这里真实保存 md5 的时机应该是上报给服务器之后，成功了再进行写入，这里只是测试追加和获取功能
                         //saveStringArray2File(this, arrayOf(md5))
+
+                        Log.d(TAG, "没有新的短信要发送")
                         continue
                     }
 
@@ -533,7 +567,6 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
      * 判断这条短信是否没有上报过
      */
     private fun isNewSms(md5: String): Boolean {
-        Log.d(TAG, "isNewSms？ is：$md5")
         return !getUploadedSmsMd5Array().also { Log.d(TAG, "all sms :${it.contentToString()}") }
             .contains(md5)
     }
@@ -594,8 +627,11 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                     handleGetAllSMS(callback, result)
                 }
             }
-        val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION);
-        registerReceiver(smsInterceptor, filter)
+        val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
+        if (!isSmsInterceptorRegistered) {
+            registerReceiver(smsInterceptor, filter)
+            isSmsInterceptorRegistered = true
+        }
 
         // 定时器
         serviceScope.launch {
@@ -631,8 +667,13 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
 
     private fun closeSmsReceiver() {
-        if (smsInterceptor != null) {
-            unregisterReceiver(smsInterceptor)
+        try {
+            if (isSmsInterceptorRegistered && smsInterceptor!= null) {
+                unregisterReceiver(smsInterceptor)
+                isSmsInterceptorRegistered = false
+            }
+        } catch (e: IllegalFormatException) {
+            e.printStackTrace()
         }
         if (timer != null) {
             timer?.cancel()
@@ -732,14 +773,27 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         if (!TextUtils.isEmpty(actvationCode)) {
             Log.i(TAG, "actvationCode: $actvationCode")
             val components = actvationCode.split("$")
-            if (components.size < 3 || components[0] != "LPA:1") return
+            Log.d(TAG, "components: $components")
+            if (components.size < 3 || components[0] != "LPA:1") {
+                Log.e(TAG, "Invalid activation code !!!!!")
+                with(result) {
+                    state = 2
+                    msg = "Invalid activation code !!!!!"
+                }
+                callback.onResult(result)
+                return
+            }
             val server = components[1]
             val activationCode = components[2]
             val confirmationCode = components[3]
             val imei = components[4]
 
+            Log.i(TAG, "serviceScope.launch: $actvationCode")
             serviceScope.launch {
+
                 var currentProgress = 0
+
+                Log.d(TAG, "向运营商发起下载请求")
                 beginTrackedOperation {
                     if (currentChannel == null) {
                         return@beginTrackedOperation false
@@ -775,9 +829,10 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                             hashMapOf(
                                 "iccid" to currentChannel!!.lpa.notifications.firstOrNull()?.iccid,
                                 "actvationCode" to actvationCode,
-                                "imei" to telephonyManager.getImei(slotId!!)
+                                "imei" to telephonyManager.getImei()
                             )
                         )
+                        Log.d(TAG, "下载 SIM 卡结果：$data 。。。 imei：${telephonyManager.getImei()}")
 
                     } else {
                         state = 2
@@ -862,14 +917,29 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         callback.onResult(result)
     }
 
-    private fun handleInit(callback: EuiccAidlCallback, result: AidlResult) {
-        bindService(
-            Intent(application, EuiccChannelManagerService::class.java),
-            euiccChannelManagerServiceConnection,
-            Context.BIND_AUTO_CREATE
-        )
-        result.msg = "初始化完成"
-        callback.onResult(result)
+    private fun handleInit(
+        params: MutableMap<Any?, Any?>?,
+        callback: EuiccAidlCallback,
+        result: AidlResult
+    ) {
+        serviceScope.launch {
+            if (euiccChannelManager == null || currentChannel == null) {
+                bindService(
+                    Intent(application, EuiccChannelManagerService::class.java),
+                    euiccChannelManagerServiceConnection,
+                    Context.BIND_AUTO_CREATE
+                )
+            }
+            if (params != null) {
+                val mSlotId = if (params.contains("slotId")) params["slotId"] as Int else 1
+                val mPortId = if (params.contains("portId")) params["portId"] as Int else 0
+                // 进行插槽映射
+                slotMapping(mSlotId, mPortId)
+            }
+
+            result.msg = "初始化完成"
+            callback.onResult(result)
+        }
     }
 
 
@@ -891,14 +961,18 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             }
         }
 
+        Log.d(TAG, "knownChannels: $knownChannels")
+
         withContext(Dispatchers.Main) {
             knownChannels?.sortedBy { it.logicalSlotId }
 
-            if (knownChannels != null) {
-                if (knownChannels.isNotEmpty()) {
-                    slotId = knownChannels.first().slotId
-                    portId = knownChannels.first().portId
-                }
+            if (!knownChannels.isNullOrEmpty()) {
+                slotId = knownChannels.first().slotId
+                portId = knownChannels.first().portId
+            } else {
+                // 没有映射成功的卡直接进行卡映射
+                Log.d(TAG, "没有映射成功的卡直接进行卡映射")
+                slotMapping(1, 0)
             }
         }
     }
@@ -955,8 +1029,11 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                 } else {
                     preferenceRepository.notificationDisableFlow.first()
                 }
+            }
 
-
+            // 判断网络
+            if (getMobileNetState() == 1) {
+                turnOffOnMobileNet(0)
             }
         }
 
@@ -1138,29 +1215,87 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         return content.split(",").toTypedArray()
     }
 
-    private fun slotMapping() {
-        var mappings: Collection<UiccSlotMapping>
 
-
-        serviceScope.launch(Dispatchers.Main) {
-            mappings = withContext(Dispatchers.IO) {
-                telephonyManager.simSlotMapping
-            }
-            try {
-                withContext(Dispatchers.IO) {
-                    // Use the utility method from PrivilegedTelephonyUtils to ensure
-                    // unmapped ports have all profiles disabled
-                    telephonyManager.updateSimSlotMapping(
-                        euiccChannelManager!!,
-                        mappings
-                    )
-                }
-            } catch (e: Exception) {
-                //Toast.makeText(this@AIDLEuiccService, R.string.slot_mapping_failure, Toast.LENGTH_LONG).show()
-                e.printStackTrace()
-                return@launch
-            }
+    // 插槽映射
+    private suspend fun slotMapping(slotId: Int, portId: Int) {
+        // 获取到已经映射好的结果
+        val mapped = withContext(Dispatchers.IO) {
+            telephonyManager.simSlotMapping
         }
+        // 获取物理插槽
+        val ports = telephonyManager.uiccCardsInfoCompat.flatMap { it.ports }.toMutableList()
+
+        // 用来存放映射的容器
+        val mappings: MutableList<UiccSlotMapping> = mutableListOf()
+
+
+        Log.d("slotMapping", "mapped: $mapped")
+        Log.d(
+            "slotMapping",
+            "ports: ${ports.map { "(mPortIndex=${it.portIndex} ,physicalSlotIndex=${it.card.physicalSlotIndex}, mLogicalSlotIndex=${it.logicalSlotIndex})" }}"
+        )
+
+
+        val find = ports.find { it.card.physicalSlotIndex == slotId && it.portIndex == portId }
+
+        if (find != null) {
+            // 找到目标插槽
+            Log.d("slotMapping", "找到目标插槽：LogicalSlotIndex=${find.logicalSlotIndex}")
+
+            if (find.logicalSlotIndex != 0) {
+                Log.d("slotMapping", "这个插槽对应的默认虚拟插槽index不为 0，需要重新映射")
+                // 只有一个！
+                mappings.add(
+                    UiccSlotMapping(
+                        find.portIndex, find.card.physicalSlotIndex, 0
+                    )
+                )
+                ports.remove(find)
+                // 判断是否开启了 多卡多待
+                if (telephonyManager.dsdsEnabled) {
+                    ports.forEach {
+                        mappings.add(
+                            UiccSlotMapping(
+                                it.portIndex,
+                                it.card.physicalSlotIndex,
+                                mappings.size
+                            )
+                        )
+                    }
+                }
+
+                Log.d("slotMapping", "mappings: $mappings")
+
+                try {
+                    withContext(Dispatchers.IO) {
+                        // Use the utility method from PrivilegedTelephonyUtils to ensure
+                        // unmapped ports have all profiles disabled
+                        telephonyManager.updateSimSlotMapping(
+                            euiccChannelManager!!,
+                            mappings
+                        )
+                    }
+                } catch (e: Exception) {
+                    //Toast.makeText(this@AIDLEuiccService, R.string.slot_mapping_failure, Toast.LENGTH_LONG).show()
+                    e.printStackTrace()
+                }
+                delay(2000)
+                withContext(Dispatchers.Main) {
+                    try {
+                        euiccChannelManager!!.invalidate()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            } else {
+                // 插槽映射关系正确
+                Log.d("slotMapping", "插槽映射关系正确，退出")
+            }
+        } else {
+            // 没有这个插槽
+            Log.d("slotMapping", "没有这个插槽，退出")
+        }
+
     }
 
 }
