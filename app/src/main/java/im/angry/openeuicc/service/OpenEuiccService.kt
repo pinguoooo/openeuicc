@@ -12,6 +12,8 @@ import net.typeblog.lpac_jni.LocalProfileInfo
 import im.angry.openeuicc.core.EuiccChannel
 import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.util.*
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.single
 import kotlinx.coroutines.runBlocking
 import java.lang.IllegalStateException
 
@@ -166,7 +168,7 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
 
     override fun onGetEuiccProfileInfoList(slotId: Int): GetEuiccProfileInfoListResult = withEuiccChannelManager {
         Log.i(TAG, "onGetEuiccProfileInfoList slotId=$slotId")
-        if (shouldIgnoreSlot(slotId)) {
+        if (slotId == -1 || shouldIgnoreSlot(slotId)) {
             Log.i(TAG, "ignoring slot $slotId")
             return GetEuiccProfileInfoListResult(RESULT_FIRST_USER, arrayOf(), true)
         }
@@ -228,11 +230,17 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
                 }
             }
 
-            return if (channels[0].lpa.deleteProfile(iccid)) {
-                RESULT_OK
-            } else {
-                RESULT_FIRST_USER
+            euiccChannelManager.beginTrackedOperationBlocking(channels[0].slotId, channels[0].portId) {
+                if (channels[0].lpa.deleteProfile(iccid)) {
+                    return RESULT_OK
+                }
+
+                runBlocking {
+                    preferenceRepository.notificationDeleteFlow.first()
+                }
             }
+
+            return RESULT_FIRST_USER
         } catch (e: Exception) {
             return RESULT_FIRST_USER
         }
@@ -285,14 +293,22 @@ class OpenEuiccService : EuiccService(), OpenEuiccContextMarker {
                 return RESULT_FIRST_USER
             }
 
-            // Disable any active profile first if present
-            channel.lpa.profiles.find {
-                it.state == LocalProfileInfo.State.Enabled
-            }?.let { if (!channel.lpa.disableProfile(it.iccid)) return RESULT_FIRST_USER }
+            euiccChannelManager.beginTrackedOperationBlocking(channel.slotId, channel.portId) {
+                if (iccid != null) {
+                    // Disable any active profile first if present
+                    channel.lpa.disableActiveProfile(false)
+                    if (!channel.lpa.enableProfile(iccid)) {
+                        return RESULT_FIRST_USER
+                    }
+                } else {
+                    if (!channel.lpa.disableActiveProfile(true)) {
+                        return RESULT_FIRST_USER
+                    }
+                }
 
-            if (iccid != null) {
-                if (!channel.lpa.enableProfile(iccid)) {
-                    return RESULT_FIRST_USER
+                runBlocking {
+                    // TODO: The enable / disable operations should really be one
+                    preferenceRepository.notificationEnableFlow.first()
                 }
             }
 

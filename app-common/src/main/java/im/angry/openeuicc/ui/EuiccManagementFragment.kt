@@ -47,6 +47,10 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
     private val adapter = EuiccProfileAdapter()
 
+    // Marker for when this fragment might enter an invalid state
+    // e.g. after a failed enable / disable operation
+    private var invalid = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setHasOptionsMenu(true)
@@ -106,6 +110,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
     @SuppressLint("NotifyDataSetChanged")
     private fun refresh() {
+        if (invalid) return
         swipeRefresh.isRefreshing = true
 
         lifecycleScope.launch {
@@ -129,25 +134,53 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
         lifecycleScope.launch {
             beginTrackedOperation {
-                val res = if (enable) {
-                    channel.lpa.enableProfile(iccid)
-                } else {
-                    channel.lpa.disableProfile(iccid)
-                }
+                val (res, refreshed) =
+                    if (!channel.lpa.switchProfile(iccid, enable, refresh = true)) {
+                        // Sometimes, we *can* enable or disable the profile, but we cannot
+                        // send the refresh command to the modem because the profile somehow
+                        // makes the modem "busy". In this case, we can still switch by setting
+                        // refresh to false, but then the switch cannot take effect until the
+                        // user resets the modem manually by toggling airplane mode or rebooting.
+                        Pair(channel.lpa.switchProfile(iccid, enable, refresh = false), false)
+                    } else {
+                        Pair(true, true)
+                    }
 
                 if (!res) {
                     Log.d(TAG, "Failed to enable / disable profile $iccid")
-                    withContext(Dispatchers.Main){
-                        Toast.makeText(context, R.string.toast_profile_enable_failed, Toast.LENGTH_LONG)
-                            .show()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            R.string.toast_profile_enable_failed,
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                     return@beginTrackedOperation false
+                }
+
+                if (!refreshed) {
+                    withContext(Dispatchers.Main) {
+                        AlertDialog.Builder(requireContext()).apply {
+                            setMessage(R.string.switch_did_not_refresh)
+                            setPositiveButton(android.R.string.ok) { dialog, _ ->
+                                dialog.dismiss()
+                                requireActivity().finish()
+                            }
+                            setOnDismissListener { _ ->
+                                requireActivity().finish()
+                            }
+                            show()
+                        }
+                    }
+                    return@beginTrackedOperation true
                 }
 
                 try {
                     euiccChannelManager.waitForReconnect(slotId, portId, timeoutMillis = 30 * 1000)
                 } catch (e: TimeoutCancellationException) {
                     withContext(Dispatchers.Main) {
+                        // Prevent this Fragment from being used again
+                        invalid = true
                         // Timed out waiting for SIM to come back online, we can no longer assume that the LPA is still valid
                         AlertDialog.Builder(requireContext()).apply {
                             setMessage(R.string.enable_disable_timeout)
@@ -214,13 +247,13 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
         private val profileMenu: ImageButton = root.requireViewById(R.id.profile_menu)
 
         init {
-//            iccid.setOnClickListener {
-//                if (iccid.transformationMethod == null) {
-//                    iccid.transformationMethod = PasswordTransformationMethod.getInstance()
-//                } else {
-//                    iccid.transformationMethod = null
-//                }
-//            }
+            iccid.setOnClickListener {
+                if (iccid.transformationMethod == null) {
+                    iccid.transformationMethod = PasswordTransformationMethod.getInstance()
+                } else {
+                    iccid.transformationMethod = null
+                }
+            }
 
             profileMenu.setOnClickListener { showOptionsMenu() }
         }
@@ -240,7 +273,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
             )
             provider.text = profile.providerName
             iccid.text = profile.iccid
-            //iccid.transformationMethod = PasswordTransformationMethod.getInstance()
+            iccid.transformationMethod = PasswordTransformationMethod.getInstance()
         }
 
         private fun showOptionsMenu() {
