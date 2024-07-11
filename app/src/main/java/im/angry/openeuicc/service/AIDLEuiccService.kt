@@ -8,9 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.ServiceConnection
-import android.database.Cursor
 import android.graphics.Bitmap
-import android.icu.lang.UCharacter.GraphemeClusterBreak.T
+import android.os.CountDownTimer
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -21,25 +20,17 @@ import android.provider.Telephony
 import android.telephony.UiccSlotMapping
 import android.text.TextUtils
 import android.util.Log
-import android.widget.Toast
-import androidx.annotation.LongDef
-import androidx.core.content.ContentProviderCompat.requireContext
-import androidx.datastore.preferences.protobuf.Internal.toByteArray
-import androidx.lifecycle.lifecycleScope
 import com.google.gson.Gson
 import im.angry.openeuicc.AidlResult
 import im.angry.openeuicc.EuiccAidlCallback
 import im.angry.openeuicc.EuiccAidlInterface
-import im.angry.openeuicc.R
 import im.angry.openeuicc.core.EuiccChannel
 import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.sms.SmsInterceptor
-import im.angry.openeuicc.ui.BaseEuiccAccessActivity
 import im.angry.openeuicc.ui.MainActivity
 import im.angry.openeuicc.ui.ProfileDownloadFragment
 import im.angry.openeuicc.ui.ProfileRenameFragment
 import im.angry.openeuicc.util.OpenEuiccContextMarker
-import im.angry.openeuicc.util.UiccPortInfoCompat
 import im.angry.openeuicc.util.dsdsEnabled
 import im.angry.openeuicc.util.operational
 import im.angry.openeuicc.util.preferenceRepository
@@ -49,6 +40,7 @@ import im.angry.openeuicc.util.uiccCardsInfoCompat
 import im.angry.openeuicc.util.updateSimSlotMapping
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Runnable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -56,12 +48,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.typeblog.lpac_jni.LocalProfileInfo
-import net.typeblog.lpac_jni.LocalProfileNotification
 import net.typeblog.lpac_jni.ProfileDownloadCallback
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.util.Arrays
 import java.util.IllegalFormatException
 import java.util.Timer
 import java.util.TimerTask
@@ -74,7 +64,6 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
     private var smsInterceptor: BroadcastReceiver? = null
     var isSmsInterceptorRegistered = false
-    private var timer: Timer? = null
 
     private var currentChannel: EuiccChannel? = null
         get() = if (euiccChannelManager == null) null
@@ -511,7 +500,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                     val subId = it.getInt(it.getColumnIndex("sub_id"))
                     Log.d(TAG, "handleGetAllSMS: subId: ${subId}")
                     // 这条短信可能自己往外面发，且发送失败的，这里subId 是空的
-                    if (subId <= 0){
+                    if (subId <= 0) {
                         continue
                     }
                     val iccid =
@@ -609,14 +598,61 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             }
         }
 
-        // 到时间了，直接关掉好了
-        Handler(Looper.getMainLooper()).postDelayed({
-            handleCloseSmsReceiver(
-                callback,
-                result.also { it.msg = "到达超时限制，关闭监听和上报" })
-        }, timeout)
+        // 倒计时且按间隔执行上报任务
+        startCountdownTimer(callback, result, timeout,interval)
 
         // 监听
+        doSmsInterceptor(result, callback)
+
+    }
+
+    private var countDownTimer: CountDownTimer? = null
+
+    private fun startCountdownTimer(
+        callback: EuiccAidlCallback,
+        result: AidlResult,
+        timeout: Long,
+        interval: Long,
+    ) {
+        serviceScope.launch {
+
+            // 取消之前的CountDownTimer对象
+            countDownTimer?.cancel()
+
+            // 创建一个新的CountDownTimer对象
+            countDownTimer = object : CountDownTimer(timeout, interval) {
+                override fun onTick(millisUntilFinished: Long) {
+                    // 每次间隔执行的操作
+                    // 上报短信
+                    Log.d(TAG, "定时上报短信！！！！！")
+                    result.msg = "定时上报短信！"
+                    handleGetAllSMS(callback, result)
+                }
+
+                override fun onFinish() {
+                    handleCloseSmsReceiver(
+                        callback,
+                        result.also { it.msg = "到达超时限制，关闭监听和上报" }
+                    )
+                }
+            }
+
+            // 启动倒计时
+            countDownTimer?.start()
+        }
+
+    }
+
+
+    private fun doSmsInterceptor(
+        result: AidlResult,
+        callback: EuiccAidlCallback
+    ) {
+        if (smsInterceptor != null && (smsInterceptor as SmsInterceptor).onSmsReceivedListener != null && isSmsInterceptorRegistered) {
+            Log.d(TAG, "initSmsReceiver: 已经有短信拦截器了，不需要再创建")
+            return
+        }
+
         smsInterceptor = SmsInterceptor()
         (smsInterceptor as SmsInterceptor).onSmsReceivedListener =
             object : SmsInterceptor.OnSmsReceivedListener {
@@ -629,31 +665,9 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             }
         val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
         if (!isSmsInterceptorRegistered) {
-            registerReceiver(smsInterceptor, filter)
+            val registerReceiver = registerReceiver(smsInterceptor, filter)
             isSmsInterceptorRegistered = true
         }
-
-        // 定时器
-        serviceScope.launch {
-            withContext(Dispatchers.IO) {
-                // 创建一个定时器
-                timer = Timer()
-                // 创建一个定时任务
-                val timerTask = object : TimerTask() {
-                    override fun run() {
-                        // 上报短信
-                        Log.d(TAG, "定时上报短信！！！！！")
-                        result.msg = "定时上报短信！"
-                        handleGetAllSMS(callback, result)
-                    }
-                }
-
-
-                // 定时器开始执行定时任务，第一个参数是定时任务，第二个参数是延迟的时间（单位是毫秒），第三个参数是执行任务的间隔时间（单位是毫秒）
-                timer?.schedule(timerTask, 0, interval)
-            }
-        }
-
     }
 
     /**
@@ -668,17 +682,16 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
     private fun closeSmsReceiver() {
         try {
-            if (isSmsInterceptorRegistered && smsInterceptor!= null) {
+            if (isSmsInterceptorRegistered && smsInterceptor != null) {
                 unregisterReceiver(smsInterceptor)
                 isSmsInterceptorRegistered = false
             }
         } catch (e: IllegalFormatException) {
             e.printStackTrace()
         }
-        if (timer != null) {
-            timer?.cancel()
-            timer = null
-        }
+
+        countDownTimer?.cancel()
+        countDownTimer = null
     }
 
 
@@ -1132,12 +1145,21 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         serviceScope.launch {
             try {
                 doDelete(iccid)
-                callback.onResult(AidlResult(1, "", "删除成功"))
+                callback.onResult(
+                    result.also {
+                        it.state = 1
+                        it.msg = "删除成功"
+                    }
+                )
             } catch (e: Exception) {
                 Log.d(ProfileDownloadFragment.TAG, "Error deleting profile")
                 Log.d(ProfileDownloadFragment.TAG, Log.getStackTraceString(e))
 
-                callback.onResult(AidlResult(2, "", "删除失败"))
+                callback.onResult(
+                    result.also {
+                        it.state = 2
+                        it.msg = "删除失败"
+                    })
             }
         }
     }
