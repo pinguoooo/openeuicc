@@ -624,7 +624,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                 override fun onTick(millisUntilFinished: Long) {
                     // 每次间隔执行的操作
                     // 上报短信
-                    Log.d(TAG, "定时上报短信！！！！！")
+                    Log.d(TAG, "定时上报短信！！！！！剩余时间：${millisUntilFinished}ms")
                     result.msg = "定时上报短信！"
                     handleGetAllSMS(callback, result)
                 }
