@@ -31,6 +31,7 @@ import im.angry.openeuicc.ui.MainActivity
 import im.angry.openeuicc.ui.ProfileDownloadFragment
 import im.angry.openeuicc.ui.ProfileRenameFragment
 import im.angry.openeuicc.util.OpenEuiccContextMarker
+import im.angry.openeuicc.util.PropertyUtils
 import im.angry.openeuicc.util.dsdsEnabled
 import im.angry.openeuicc.util.operational
 import im.angry.openeuicc.util.preferenceRepository
@@ -59,17 +60,19 @@ import java.util.TimerTask
 class AIDLEuiccService : Service(), OpenEuiccContextMarker {
     private val serviceScope = CoroutineScope(Dispatchers.Main)
     private lateinit var mCallbacks: RemoteCallbackList<EuiccAidlCallback>
-    private var slotId: Int? = 1
-    private var portId: Int? = 0
+    // 第一次初始值根据模式选择
+    private var slotId: Int = if (currentMode == MODE_SIM) 0 else 1
+    private var portId: Int = 0
 
     private var smsInterceptor: BroadcastReceiver? = null
     var isSmsInterceptorRegistered = false
 
     private var currentChannel: EuiccChannel? = null
         get() = if (euiccChannelManager == null) null
+        else if (slotId == -1) null
         else euiccChannelManager?.findEuiccChannelByPortBlocking(
-            slotId!!,
-            portId!!
+            slotId,
+            portId
         )
 
     private var euiccChannelManager: EuiccChannelManager? = null
@@ -77,6 +80,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
     private val euiccChannelManagerServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+
             euiccChannelManager =
                 (service!! as EuiccChannelManagerService.LocalBinder).service.euiccChannelManager
             onInit()
@@ -93,7 +97,18 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
     companion object {
         private const val TAG = "AIDLEuiccService"
+        const val PROP_EUICC_MODE = "persist.sys.euiccMode"
+        const val MODE_SIM = "sim"
+        const val MODE_ESIM = "esim"
     }
+
+    private var currentMode: String
+        get() {
+            return PropertyUtils.getProperty(PROP_EUICC_MODE, "")
+        }
+        set(value) {
+            PropertyUtils.setProperty(PROP_EUICC_MODE, value)
+        }
 
 
     override fun onBind(intent: Intent): IBinder {
@@ -316,7 +331,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
                     return
                 }
 
-                if (euiccChannelManager == null || currentChannel == null || slotId == null || portId == null) {
+                if (euiccChannelManager == null || currentChannel == null) {
                     Log.d(TAG, "euiccChannelManager 或者 currentChannel 为空，进行初始化")
                     Log.d(TAG, "bindService()")
                     bindService(
@@ -599,7 +614,7 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
         }
 
         // 倒计时且按间隔执行上报任务
-        startCountdownTimer(callback, result, timeout,interval)
+        startCountdownTimer(callback, result, timeout, interval)
 
         // 监听
         doSmsInterceptor(result, callback)
@@ -980,13 +995,14 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
             knownChannels?.sortedBy { it.logicalSlotId }
 
             if (!knownChannels.isNullOrEmpty()) {
+                Log.d(TAG, "有映射成功的卡 knownChannels: $knownChannels")
                 slotId = knownChannels.first().slotId
                 portId = knownChannels.first().portId
             } else {
                 // 没有映射成功的卡直接进行卡映射
                 Log.d(TAG, "没有映射成功的卡直接进行卡映射")
-                slotMapping(1, 0)
             }
+            slotMapping(slotId, portId)
         }
     }
 
@@ -1020,8 +1036,8 @@ class AIDLEuiccService : Service(), OpenEuiccContextMarker {
 
                 try {
                     euiccChannelManager?.waitForReconnect(
-                        slotId!!,
-                        portId!!,
+                        slotId,
+                        portId,
                         timeoutMillis = 30 * 1000
                     )
                 } catch (e: TimeoutCancellationException) {
