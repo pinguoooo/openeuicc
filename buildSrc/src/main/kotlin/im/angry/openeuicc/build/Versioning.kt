@@ -15,7 +15,9 @@ val Project.gitVersionCode: Int
                 commandLine("git", "rev-list", "--first-parent", "--count", "HEAD")
                 standardOutput = stdout
             }
-            stdout.toString("utf-8").trim('\n').toInt() + 1716791086
+            val updatedTimes = stdout.toString("utf-8").trim('\n').toInt()
+            println("git versionCode: $updatedTimes")
+            updatedTimes + 1743995850
         } catch (e: Exception) {
             0
         }
